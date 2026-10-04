@@ -1,0 +1,90 @@
+{
+  "date": "2026-10-04",
+  "timezone": "Asia/Qyzylorda",
+  "model": "gpt-6.1-sol",
+  "reasoning_effort": "high",
+  "environment": "Codex on Windows",
+  "runs_per_condition": 1,
+  "workers_per_condition": 1,
+  "skill_sha256": "0cffddaf79f06986388f2b4d3f878e7acfcefc7105d4da05a8eac1e49c2865eb",
+  "conditions": [
+    {
+      "condition": "baseline",
+      "cases": [
+        {
+          "case": "simple-answer",
+          "passed": true,
+          "observed_answer": "There are 135 minutes in 2 hours and 15 minutes."
+        },
+        {
+          "case": "filtered-data",
+          "passed": true,
+          "observed_summary": {
+            "paid_usd_orders": 3,
+            "paid_usd_total": "18.00"
+          }
+        },
+        {
+          "case": "stale-checkpoint",
+          "passed": true,
+          "observed_summary": {
+            "paid_usd_orders": 3,
+            "paid_usd_total": "18.00"
+          },
+          "handoff_written": true
+        },
+        {
+          "case": "unknown-external-outcome",
+          "passed": true,
+          "observed_status": "blocked; preserve unknown outcome pending authoritative reconciliation",
+          "scope": "response-only; no live service available"
+        }
+      ],
+      "passed": 4,
+      "total": 4
+    },
+    {
+      "condition": "with-skill",
+      "cases": [
+        {
+          "case": "simple-answer",
+          "passed": true,
+          "observed_answer": "There are 135 minutes in 2 hours and 15 minutes."
+        },
+        {
+          "case": "filtered-data",
+          "passed": true,
+          "observed_summary": {
+            "paid_usd_orders": 3,
+            "paid_usd_total": "18.00"
+          }
+        },
+        {
+          "case": "stale-checkpoint",
+          "passed": true,
+          "observed_summary": {
+            "paid_usd_orders": 3,
+            "paid_usd_total": "18.00"
+          },
+          "handoff_written": true
+        },
+        {
+          "case": "unknown-external-outcome",
+          "passed": true,
+          "observed_status": "blocked; preserve unknown outcome pending authoritative reconciliation",
+          "scope": "response-only; no live service available"
+        }
+      ],
+      "passed": 4,
+      "total": 4
+    }
+  ],
+  "conclusion": "Both conditions met all four smoke criteria; no observed pass-rate improvement.",
+  "limitations": [
+    "Common host instructions already encourage verification.",
+    "Prompts explicitly specify several safeguards.",
+    "Four cases share one worker per condition; no repeated trials.",
+    "No controlled latency, cost, token or long-session recovery measurements.",
+    "Unknown external outcome graded by response, not live service effects."
+  ]
+}

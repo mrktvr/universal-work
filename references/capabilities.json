@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "capabilities": [
+    {
+      "id": "research",
+      "purpose": "Resolve a factual or comparative question using supported current evidence",
+      "procedure": "research.md",
+      "requires": [
+        "relevant source retrieval available in the host"
+      ],
+      "verification": [
+        "source directly supports claim",
+        "scope and currentness assessed",
+        "contradictions addressed"
+      ]
+    },
+    {
+      "id": "coding",
+      "purpose": "Implement or repair a change in an authorized project",
+      "procedure": "coding.md",
+      "requires": [
+        "authorized project access",
+        "available execution or inspection tools"
+      ],
+      "verification": [
+        "relevant behavior checked",
+        "user changes preserved",
+        "integrated result reviewed"
+      ]
+    },
+    {
+      "id": "documents-data",
+      "purpose": "Produce an artifact or analyze structured data",
+      "procedure": "documents-data.md",
+      "requires": [
+        "input data",
+        "appropriate host skill or artifact tools"
+      ],
+      "verification": [
+        "source fidelity",
+        "independent calculations",
+        "structure and visual review where applicable"
+      ]
+    },
+    {
+      "id": "operations",
+      "purpose": "Inspect or change a service within existing authorization",
+      "procedure": "operations.md",
+      "requires": [
+        "supported authenticated integration",
+        "authorization for requested effect"
+      ],
+      "verification": [
+        "actual service state",
+        "unknown outcomes reconciled",
+        "side effects reported"
+      ]
+    },
+    {
+      "id": "delegation",
+      "purpose": "Partition independent work or obtain an independent review",
+      "procedure": "delegation.md",
+      "requires": [
+        "host subagents available",
+        "isolatable useful work units"
+      ],
+      "verification": [
+        "evidence returned",
+        "ownership respected",
+        "main agent integration check"
+      ]
+    },
+    {
+      "id": "local-ledger",
+      "purpose": "Persist local task checkpoints and verify deterministic artifact criteria",
+      "procedure": "ledger.md",
+      "requires": [
+        "Python 3.10 or later",
+        "writable local task storage"
+      ],
+      "verification": [
+        "CLI success status",
+        "current artifact checks",
+        "explicit uncertainty retained"
+      ]
+    }
+  ]
+}

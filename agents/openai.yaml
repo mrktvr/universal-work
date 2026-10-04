@@ -1,0 +1,11 @@
+interface:
+  display_name: "Universal Work"
+  short_description: "Complete complex tasks with checkpoints and verification"
+  default_prompt: "Use $universal-work to complete this task, save useful progress and verify the result."
+  icon_small: "./assets/icon.svg"
+  icon_large: "./assets/icon.svg"
+policy:
+  products:
+  - CHAT
+  - CODEX
+  allow_implicit_invocation: true

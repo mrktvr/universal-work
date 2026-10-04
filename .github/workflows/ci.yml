@@ -1,0 +1,51 @@
+name: Runtime acceptance
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.14']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run runtime acceptance suite
+        run: python scripts/test_workctl.py
+      - name: Require Linux symlink checks without skips
+        if: runner.os == 'Linux'
+        shell: python {0}
+        run: |
+          import sys
+          import unittest
+          sys.path.insert(0, 'scripts')
+          from test_workctl import WorkctlAcceptance
+          names = (
+              'test_symlink_escape_is_rejected_at_verification_and_claim',
+              'test_directory_symlink_escape_is_rejected',
+          )
+          suite = unittest.TestSuite(WorkctlAcceptance(name) for name in names)
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if not result.wasSuccessful() or result.skipped:
+              raise SystemExit('Linux symlink checks must pass without skips')
+      - name: Run resumable local example
+        run: python examples/resume_demo.py
