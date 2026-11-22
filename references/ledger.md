@@ -89,13 +89,63 @@ Use the original workspace, database and task ID. Run `diagnose TASK_ID` and com
 
 1. If the task still says `running`, confirm through the host or operator that the previous worker has stopped. The ledger status and checkpoint age alone cannot establish that. Once confirmed, run `block TASK_ID --reason "Previous worker confirmed stopped"` to record the interruption and pause ledger work. If you cannot confirm the worker stopped, leave the task for the operator to resolve.
 2. For a blocked or stopped task, reconcile any prepared or unknown action with authoritative readback or a receipt before continuing. If the outcome stays uncertain, leave the task paused and preserve the journal entry. Inspect any artifacts left by the previous worker and resolve its advisory claims before writing the affected resources.
-3. Run `resume TASK_ID` once the unresolved actions are settled. It preserves the task ID, original deadline and used steps. If the limits are exhausted, report the result and keep the original records. Change the task scope explicitly only if the user authorizes further work.
+3. Run `resume TASK_ID` once the unresolved actions are settled and the files you plan to reuse have passed your checks. It preserves the task ID, original deadline and used steps. If the limits are exhausted, report the result and keep the original records. Change the task scope explicitly only if the user authorizes further work.
 
 `diagnose` reads the committed ledger state. It can find the latest checkpoint even if it has fallen out of the recent event window. It reports ledger-side resume blockers, the latest recorded verification and up to 50 entries each for unresolved actions and outstanding claims. Use the counts and truncation flags to account for additional entries.
 
 `current_pause` is the saved block or stop reason for the current paused state, or `null` when no such reason is recorded. `workspace_available` says whether the stored workspace resolves to its original directory on this host. This is a filesystem observation. Inspect current artifact files and confirm external outcomes separately. For a running task, confirm that the original worker stopped before takeover. Keep the diagnosis local because it contains workspace paths, checkpoint notes, pause reasons and action evidence.
 
 `show`, `diagnose` and `export-evidence` open the ledger read-only. On a live WAL ledger, SQLite can still use its journal sidecar files to coordinate readers. Use a consistent SQLite snapshot for archival review.
+
+### PowerShell example: check a saved artifact before resuming
+
+Run these commands from the original project workspace. Run the setup block in each PowerShell session before the first `py -3` call. The first two lines make Python and PowerShell use UTF-8 for CLI output so paths with non-ASCII characters display correctly. Set `$workctl` to the actual path of the installed CLI (or use `.\scripts\workctl.py` when working in a Universal Work checkout). Set `$db` to the existing task database if it uses a different path. Use `list` to identify the original task if you need its ID.
+
+```powershell
+$env:PYTHONIOENCODING = 'utf-8'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+
+$workctl = 'C:\path\to\universal-work\scripts\workctl.py'
+$db = '.universal-work\state.sqlite3'
+$artifact = 'onboarding-findings.md'
+py -3 $workctl --db $db list
+$taskId = Read-Host 'Original task ID'
+```
+
+While the original task is running, save the report and record its workspace-relative path and SHA-256 alongside the remaining work:
+
+```powershell
+$hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256 -ErrorAction Stop).Hash
+$note = "Artifact: $artifact | SHA-256: $hash | Remaining: review the recovery guide and write the final recommendations."
+py -3 $workctl --db $db checkpoint $taskId --note $note
+if ($LASTEXITCODE -ne 0) { throw 'Checkpoint failed.' }
+```
+
+In the new session, repeat the setup block and inspect the task with `diagnose` and `show`. Confirm the workspace is available and account for the task limits, unresolved actions and advisory claims as described above. For a running task, confirm that the previous worker stopped before calling `block`. Once the task is paused, compare the saved fingerprint with the current file:
+
+```powershell
+$result = py -3 $workctl --db $db diagnose $taskId
+if ($LASTEXITCODE -ne 0) { throw 'Cannot read the saved task.' }
+$saved = $result | ConvertFrom-Json
+if (-not $saved.diagnosis.workspace_available -or $saved.task.state -notin @('blocked', 'stopped')) {
+    throw 'Use the original workspace and confirm the task is paused.'
+}
+$checkpoint = $saved.diagnosis.latest_checkpoint
+$pattern = '^Artifact: ' + [regex]::Escape($artifact) + ' \| SHA-256: ([0-9A-Fa-f]{64}) \|'
+if (-not $checkpoint -or $checkpoint.note -notmatch $pattern) {
+    throw 'Keep the task paused. The checkpoint has no matching artifact fingerprint.'
+}
+$expectedHash = $Matches[1]
+if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
+    throw "Keep the task paused. Missing artifact: $artifact"
+}
+$actualHash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256 -ErrorAction Stop).Hash
+if ($actualHash -ne $expectedHash) {
+    throw "Keep the task paused. SHA-256 mismatch for $artifact."
+}
+```
+
+If the file is missing, unreadable or changed, report the reason and preserve both the file state and checkpoint for review. Once the fingerprint matches and the other recovery checks pass, run `resume` on the same task ID. The fingerprint check establishes that the file bytes match the checkpoint. Review the contents against the task requirements before calling `finish`.
 
 ## Export verification evidence
 
