@@ -83,6 +83,8 @@ python examples/resume_demo.py
 
 Use `python3` if that is your Python 3.10+ command. The example runs the real CLI in separate processes, creates a task, starts it, checkpoints and stops it, then launches a fresh worker to inspect, resume, generate, verify, and finish. It fixes the exact expected JSON document before generating output. All fixtures and the ledger live in a temporary directory that is cleaned up; no network calls are made. A successful run ends with `PASS: resumed task completed with independently specified JSON criteria.`
 
+For a hands-on Windows exercise that keeps the ledger between sessions, follow the [two-session recovery walkthrough](references/windows-recovery-walkthrough.md).
+
 ## Verification
 
 ```sh
