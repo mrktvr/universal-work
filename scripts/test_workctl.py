@@ -31,9 +31,10 @@ class WorkctlAcceptance(unittest.TestCase):
         self.database = self.root / "ledger.sqlite3"
         self.spec_number = 0
 
-    def command(self, *args, ok=True):
+    def command(self, *args, ok=True, use_db=True):
+        database_args = ["--db", str(self.database)] if use_db else []
         result = subprocess.run(
-            [sys.executable, "-X", "utf8", str(WORKCTL), "--db", str(self.database), *args],
+            [sys.executable, "-X", "utf8", str(WORKCTL), *database_args, *args],
             text=True,
             encoding="utf-8",
             capture_output=True,
@@ -410,6 +411,43 @@ time.sleep(60)
             with self.subTest(options=options):
                 error = self.command("export-evidence", task_id, *options, ok=False)["error"]
                 self.assertEqual(error["code"], code)
+
+    def test_verify_evidence_replays_without_ledger_and_rejects_mismatches(self):
+        review = self.root / "review"
+        review.mkdir()
+        source = self.artifact('{"release":{"approved":1}}', "local.json")
+        task_id = self.running(criteria=[
+            {"id": "presence", "type": "file_nonempty", "path": source.name},
+            {"id": "approval", "type": "json_equals", "path": source.name,
+             "pointer": "/release/approved", "expected": 1.0},
+        ])
+        self.command("finish", task_id)
+        report = review / "qa-report.json"
+        original = source.read_bytes()
+        report.write_bytes(original)
+        bundle = review / "evidence.json"
+        exported = self.command("export-evidence", task_id, "--review-criterion", "approval",
+                                "--artifact-name", report.name)
+        bundle.write_text(json.dumps(exported), encoding="utf-8")
+        self.database = self.root / "unavailable.sqlite3"
+        args = ("verify-evidence", "--evidence", str(bundle), "--artifact", str(report))
+        verified = self.command(*args, use_db=False)
+        self.assertEqual(verified["verification"]["criterion_number"], 2)
+        self.assertEqual(verified["verification"]["sha256"], hashlib.sha256(original).hexdigest())
+        self.assertFalse(self.database.exists())
+        report.write_bytes(original + b"\n")
+        self.assertEqual(self.command(*args, ok=False, use_db=False)["error"]["code"], "fingerprint_mismatch")
+        report.write_bytes(original)
+        check = exported["evidence"]["reviewer_check"]
+        check["expected"] = True
+        bundle.write_text(json.dumps(exported), encoding="utf-8")
+        self.assertEqual(self.command(*args, ok=False, use_db=False)["error"]["code"], "verification_failed")
+        check["comparison"] = "unknown"
+        bundle.write_text(json.dumps(exported), encoding="utf-8")
+        self.assertEqual(self.command(*args, ok=False, use_db=False)["error"]["code"], "unsupported_comparison")
+        del exported["evidence"]["reviewer_check"]
+        bundle.write_text(json.dumps(exported), encoding="utf-8")
+        self.assertEqual(self.command(*args, ok=False, use_db=False)["error"]["code"], "missing_reviewer_check")
 
     def test_prepared_action_survives_process_exit_and_cannot_be_prepared_twice(self):
         self.artifact()

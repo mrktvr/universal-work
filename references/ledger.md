@@ -41,7 +41,7 @@ Supported checks:
 
 ## CLI workflow
 
-Every command requires `--db PATH` before the subcommand. `new` creates missing database parent directories; other commands reject a nonexistent database. Command output is JSON; errors return exit code 2. Check `ok` and the exit status. Task IDs come from the returned task object; never invent them. A spec is limited to 1 MiB and 128 criteria. `list` shows the latest 100 tasks; `show` includes at most 50 recent actions, 50 claims and 20 events. The complete history remains in SQLite; a limited view is not evidence that older records do not exist.
+Ledger commands require `--db PATH` before the subcommand. `new` creates missing database parent directories; other ledger commands reject a nonexistent database. Command output is JSON; errors return exit code 2. Check `ok` and the exit status. Task IDs come from the returned task object; never invent them. A spec is limited to 1 MiB and 128 criteria. `list` shows the latest 100 tasks; `show` includes at most 50 recent actions, 50 claims and 20 events. The complete history remains in SQLite; a limited view is not evidence that older records do not exist.
 
 ```text
 python <skill>/scripts/workctl.py --db <project>/.universal-work/state.sqlite3 new --spec <project>/task.json
@@ -110,6 +110,22 @@ This adds `reviewer_check` with the result's criterion number, your filename lab
 `workctl-json-equals-v1` decodes UTF-8 with an optional BOM, rejects duplicate keys and nonfinite numbers, and resolves the JSON Pointer, with the empty pointer selecting the whole document. Comparison is recursive with exact object keys and ordered arrays. Booleans and numbers are distinct. JSON fractions use Python's finite float parsing and parsed numbers compare by decimal value. Encode exact decimal quantities as strings when needed.
 
 The export carries a recorded outcome and a reproducible check. Authenticating the export or validating claims about a separate input, such as the release ZIP named in a QA report, requires independent evidence of that input or provenance.
+
+## Replay a reviewer check
+
+```text
+python scripts/workctl.py verify-evidence --evidence evidence.json --artifact qa-report.json
+```
+
+This reads the two explicit files without a ledger or network access. It checks the report filename, raw byte count and SHA-256 against the selected result, then runs the same JSON comparison used by the ledger. A successful replay requires the recorded outcome and the reproduced comparison to pass. Input limits are 2 MiB for the export and 64 MiB for the artifact. File agreement does not authenticate the export or its timestamp.
+
+For the release QA example, run the separate source check when you have the ZIP:
+
+```text
+python examples/verify_release_archive.py qa-report.json Universal_Work_v1.0_Candidate_eeb38fa.zip
+```
+
+It checks the ZIP filename, digest, integrity, number of files and commit in the ZIP comment. The comment identifies a claimed commit. Comparing file contents with Git is a separate provenance check.
 
 ## Check the installation
 
