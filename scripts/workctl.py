@@ -27,9 +27,12 @@ from decimal import Decimal, InvalidOperation, localcontext
 
 SPEC_LIMIT = 1024 * 1024
 FILE_LIMIT = 64 * 1024 * 1024
+EVIDENCE_LIMIT = 2 * SPEC_LIMIT
+JSON_COMPARISON = "workctl-json-equals-v1"
 APP_ID = 0x55574C31
 SCHEMA_VERSION = 1
 STATES = {"ready", "running", "blocked", "stopped", "checking", "completed"}
+SNAPSHOT_COMMANDS = {"diagnose", "export-evidence"}
 DECIMAL_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
 
 
@@ -203,12 +206,24 @@ def compare_resource_paths(left, right):
     return (left > right) - (left < right)
 
 
+def has_unresolved_actions(actions):
+    return bool(actions.get("prepared", 0) or actions.get("unknown", 0))
+
+
 class Ledger:
-    def __init__(self, path):
-        self.db = sqlite3.connect(path, timeout=5, isolation_level=None)
+    def __init__(self, path, snapshot=False):
+        source = Path(path).absolute().as_uri() + "?mode=ro" if snapshot else path
+        self.db = sqlite3.connect(source, uri=snapshot, timeout=5, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.create_collation("RESOURCE_PATH", compare_resource_paths)
         self.db.execute("PRAGMA busy_timeout=5000")
+        if snapshot:
+            self.db.execute("BEGIN")
+            if self.db.execute("PRAGMA application_id").fetchone()[0] != APP_ID:
+                fail("invalid_database", "Database is not a Universal Work ledger.")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+                fail("invalid_database", "Database schema version is unsupported.")
+            return
         app_id = self.db.execute("PRAGMA application_id").fetchone()[0]
         tables = self.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
         if app_id != APP_ID and (app_id or tables):
@@ -276,11 +291,17 @@ class Ledger:
         if task["state"] == "completed":
             fail("completed", "Completed tasks are immutable; create a new task.")
 
-    def budget(self, task):
+    def budget_error(self, task):
         if task["deadline"] is not None and time.time() >= task["deadline"]:
-            fail("deadline_exceeded", "The original task deadline has expired.")
+            return "deadline_exceeded", "The original task deadline has expired."
         if task["steps"] >= task["spec"]["limits"]["max_steps"]:
-            fail("step_limit", "The task step budget is exhausted.")
+            return "step_limit", "The task step budget is exhausted."
+        return None
+
+    def budget(self, task):
+        error = self.budget_error(task)
+        if error:
+            fail(*error)
 
     def running(self, task, check_budget=True):
         self.mutable(task)
@@ -290,7 +311,102 @@ class Ledger:
             self.budget(task)
 
 
-def read_artifact(workspace, relative):
+def diagnose(ledger, task):
+    summary = ledger.public(task)
+    task_id = task["id"]
+    checkpoint = ledger.db.execute(
+        "SELECT seq,at,data FROM events WHERE task_id=? AND kind='checkpoint' ORDER BY seq DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    unresolved = ledger.db.execute(
+        "SELECT key,state,description,evidence FROM actions WHERE task_id=? AND state IN ('prepared','unknown') "
+        "ORDER BY created,key LIMIT 50", (task_id,),
+    ).fetchall()
+    claims = ledger.db.execute(
+        "SELECT relpath AS resource,owner FROM claims WHERE task_id=? ORDER BY created,resource LIMIT 50",
+        (task_id,),
+    ).fetchall()
+    blockers = []
+    state = task["state"]
+    if state == "running":
+        blockers.append("confirm_previous_worker_stopped")
+    elif state == "completed":
+        blockers.append("task_completed")
+    elif task["started"] is None:
+        blockers.append("task_not_started")
+    elif state not in ("blocked", "stopped"):
+        blockers.append("invalid_state")
+    budget_error = ledger.budget_error(task)
+    if budget_error:
+        blockers.append(budget_error[0])
+    if has_unresolved_actions(summary["actions"]):
+        blockers.append("unresolved_actions")
+    unresolved_count = sum(summary["actions"].get(state, 0) for state in ("prepared", "unknown"))
+    return {
+        "ok": True,
+        "task": summary,
+        "diagnosis": {
+            "resume_blockers": blockers,
+            "latest_checkpoint": {
+                "seq": checkpoint["seq"], "at": stamp(checkpoint["at"]),
+                "note": loads(checkpoint["data"])["note"],
+            } if checkpoint else None,
+            "unresolved_actions": [dict(row) for row in unresolved],
+            "unresolved_actions_truncated": unresolved_count > len(unresolved),
+            "outstanding_claims": [dict(row) for row in claims],
+            "outstanding_claims_truncated": summary["claims"] > len(claims),
+            "recorded_verification": loads(task["verification"]) if task["verification"] else None,
+        },
+    }
+
+
+def reviewer_check(task, verification, criterion_id, artifact_name):
+    if not artifact_name or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}", artifact_name):
+        fail("invalid_argument", "--artifact-name must be a filename label with no directory components.")
+    for number, criterion in enumerate(task["spec"]["criteria"], start=1):
+        if criterion["id"] != criterion_id:
+            continue
+        if criterion["type"] != "json_equals":
+            fail("unsupported_criterion", "Reviewer exports currently support json_equals only.")
+        if verification is None or verification["results"][number - 1]["sha256"] is None:
+            fail("missing_verification", "No artifact fingerprint was recorded for this criterion.")
+        return {
+            "criterion_number": number,
+            "artifact_name": artifact_name,
+            "comparison": JSON_COMPARISON,
+            "pointer": criterion["pointer"],
+            "expected": criterion["expected"],
+        }
+    fail("not_found", "The requested criterion does not exist.")
+
+
+def export_evidence(ledger, task, args):
+    summary = ledger.public(task)
+    verification = None
+    if task["verification"]:
+        saved = loads(task["verification"])
+        results = []
+        for number, result in enumerate(saved["results"], start=1):
+            safe_result = {key: result[key] for key in ("type", "passed", "sha256", "bytes", "code")
+                           if key in result}
+            results.append({"criterion_number": number, **safe_result})
+        verification = {"checked_at": saved["checked_at"], "passed": saved["passed"], "results": results}
+    evidence = {
+        "format_version": 1,
+        "task": {key: summary[key] for key in
+                 ("id", "state", "steps", "limits", "created_at", "started_at", "deadline", "actions", "claims")},
+        "recorded_verification": verification,
+    }
+    if args.review_criterion is not None:
+        evidence["reviewer_check"] = reviewer_check(
+            task, verification, args.review_criterion, args.artifact_name,
+        )
+    elif args.artifact_name is not None:
+        fail("invalid_argument", "--artifact-name requires --review-criterion.")
+    return {"ok": True, "evidence": evidence}
+
+
+def read_artifact(workspace, relative, limit=FILE_LIMIT):
     path = contained(workspace, relative)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
@@ -298,12 +414,12 @@ def read_artifact(workspace, relative):
         before = os.fstat(handle.fileno())
         if not stat.S_ISREG(before.st_mode):
             fail("not_regular_file", "Criterion target is not a regular file.")
-        if before.st_size > FILE_LIMIT:
-            fail("file_too_large", "Criterion file exceeds 64 MiB.")
-        data = handle.read(FILE_LIMIT + 1)
+        if before.st_size > limit:
+            fail("file_too_large", f"Input file exceeds {limit // (1024 * 1024)} MiB.")
+        data = handle.read(limit + 1)
         after = os.fstat(handle.fileno())
-        if len(data) > FILE_LIMIT:
-            fail("file_too_large", "Criterion file exceeds 64 MiB.")
+        if len(data) > limit:
+            fail("file_too_large", f"Input file exceeds {limit // (1024 * 1024)} MiB.")
         if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
             fail("file_changed", "Criterion file changed during verification.")
         if contained(workspace, relative) != path or os.stat(path).st_ino != after.st_ino:
@@ -364,6 +480,49 @@ def evaluate(criterion, data):
         return abs(total - expected) <= tolerance
 
 
+def verify_evidence(evidence_path, artifact_path):
+    evidence_file = Path(evidence_path)
+    data = read_artifact(str(evidence_file.parent.resolve()), evidence_file.name, EVIDENCE_LIMIT)
+    envelope = loads(data.decode("utf-8-sig"))
+    evidence = envelope.get("evidence") if isinstance(envelope, dict) else None
+    if (not isinstance(evidence, dict) or envelope.get("ok") is not True
+            or type(evidence.get("format_version")) is not int or evidence["format_version"] != 1):
+        fail("invalid_evidence", "Expected a successful format-version 1 evidence export.")
+    check = evidence.get("reviewer_check")
+    if not isinstance(check, dict) or not {"criterion_number", "artifact_name", "comparison", "pointer",
+                                          "expected"} <= check.keys():
+        fail("missing_reviewer_check", "Export a selected JSON check using --review-criterion.")
+    if check["comparison"] != JSON_COMPARISON:
+        fail("unsupported_comparison", "This verifier does not support the supplied comparison.")
+    pointer_tokens(check["pointer"])
+    artifact_file = Path(artifact_path)
+    if check["artifact_name"] != artifact_file.name:
+        fail("artifact_name_mismatch", "The supplied filename does not match the reviewer label.")
+    verification = evidence.get("recorded_verification")
+    results = verification.get("results") if isinstance(verification, dict) else None
+    number = check["criterion_number"]
+    if type(number) is not int or not isinstance(results, list) or not 1 <= number <= len(results):
+        fail("invalid_evidence", "The evidence does not identify a recorded criterion.")
+    recorded = results[number - 1]
+    if (not isinstance(recorded, dict) or type(recorded.get("criterion_number")) is not int
+            or recorded["criterion_number"] != number or recorded.get("type") != "json_equals"
+            or type(recorded.get("passed")) is not bool or type(recorded.get("bytes")) is not int
+            or not 0 <= recorded["bytes"] <= FILE_LIMIT or not isinstance(recorded.get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", recorded["sha256"])):
+        fail("invalid_evidence", "The selected result lacks a valid JSON outcome and artifact fingerprint.")
+    raw = read_artifact(str(artifact_file.parent.resolve()), artifact_file.name)
+    digest = hashlib.sha256(raw).hexdigest()
+    if len(raw) != recorded["bytes"] or digest != recorded["sha256"]:
+        fail("fingerprint_mismatch", "The supplied file differs from the recorded bytes.")
+    criterion = {"type": "json_equals", "pointer": check["pointer"], "expected": check["expected"]}
+    if not evaluate(criterion, raw) or not recorded["passed"]:
+        fail("verification_failed", "The reproduced and recorded checks must both pass.")
+    return {"ok": True, "verification": {
+        "artifact_name": artifact_file.name, "criterion_number": number,
+        "comparison": JSON_COMPARISON, "bytes": len(raw), "sha256": digest, "passed": True,
+    }}
+
+
 def verify(ledger, task, finish=False):
     ledger.running(task, check_budget=False)
     ledger.update(task["id"], "checking")
@@ -408,7 +567,7 @@ def verify(ledger, task, finish=False):
         code, message = "verification_failed", "One or more current artifacts failed verification."
     elif finish:
         counts = ledger.counts(task["id"])
-        if counts["actions"].get("prepared", 0) or counts["actions"].get("unknown", 0):
+        if has_unresolved_actions(counts["actions"]):
             code, message = "unresolved_actions", "Reconcile all prepared or unknown actions before completion."
         elif counts["claims"]:
             code, message = "outstanding_claims", "Release all claims before completion."
@@ -440,6 +599,10 @@ def dispatch(ledger, args):
     task_id = task["id"]
     if command == "show":
         return {"ok": True, "task": ledger.public(task, detailed=True)}
+    if command == "diagnose":
+        return diagnose(ledger, task)
+    if command == "export-evidence":
+        return export_evidence(ledger, task, args)
     ledger.mutable(task)
     if command in ("verify", "finish"):
         return verify(ledger, task, command == "finish")
@@ -455,7 +618,7 @@ def dispatch(ledger, args):
             fail("invalid_state", "Only a previously started blocked or stopped task can resume.")
         ledger.budget(task)
         actions = ledger.counts(task_id)["actions"]
-        if actions.get("prepared", 0) or actions.get("unknown", 0):
+        if has_unresolved_actions(actions):
             fail("unresolved_actions", "Reconcile prepared or unknown external actions before resuming.")
         ledger.update(task_id, "running")
         ledger.event(task_id, "resumed")
@@ -528,11 +691,19 @@ def parser():
                "Inspection, stop/block, release, outcomes and final checks survive budget exhaustion.\n"
                "Verification reads regular files up to 64 MiB; output never includes file contents.\n"
                "Use one ledger to coordinate claims; these are not operating-system locks.")
-    result.add_argument("--db", required=True, help="SQLite ledger path on local disk")
+    result.add_argument("--db", help="SQLite ledger path, required for ledger commands")
     sub = result.add_subparsers(dest="command", required=True)
     new = sub.add_parser("new", help="validate a JSON spec and create a ready task")
     new.add_argument("--spec", required=True, help="UTF-8 JSON task spec, at most 1 MiB")
     sub.add_parser("list", help="show the latest 100 tasks")
+    sub.add_parser("diagnose", help="inspect saved recovery state").add_argument("task")
+    export = sub.add_parser("export-evidence", help="export recorded verification and task metadata")
+    export.add_argument("task")
+    export.add_argument("--review-criterion", metavar="ID", help="include this JSON check's expected value and pointer")
+    export.add_argument("--artifact-name", metavar="NAME", help="shareable filename label for the selected check")
+    replay = sub.add_parser("verify-evidence", help="replay a reviewer JSON check without a ledger")
+    replay.add_argument("--evidence", required=True, metavar="FILE")
+    replay.add_argument("--artifact", required=True, metavar="FILE")
     for name in ("show", "start", "checkpoint", "verify", "finish", "stop", "block", "resume", "action-prepare", "action-outcome", "claim", "release"):
         command = sub.add_parser(name)
         command.add_argument("task")
@@ -557,17 +728,24 @@ def main():
     ledger = None
     try:
         args = parser().parse_args()
-        string(args.db, "database path", 4096)
-        if args.db == ":memory:":
-            fail("invalid_database", "Use a persistent ledger file on local disk.")
-        database = Path(args.db)
-        if args.command == "new":
-            database.parent.mkdir(parents=True, exist_ok=True)
-        elif not database.is_file():
-            fail("database_not_found", "Ledger file does not exist; use new to create it.")
-        ledger = Ledger(args.db)
-        response = dispatch(ledger, args)
-        ledger.db.commit()
+        if args.command == "verify-evidence":
+            if args.db is not None:
+                fail("usage", "verify-evidence does not take --db.")
+            response = verify_evidence(args.evidence, args.artifact)
+        else:
+            if args.db is None:
+                fail("usage", "Ledger commands require --db.")
+            string(args.db, "database path", 4096)
+            if args.db == ":memory:":
+                fail("invalid_database", "Use a persistent ledger file on local disk.")
+            database = Path(args.db)
+            if args.command == "new":
+                database.parent.mkdir(parents=True, exist_ok=True)
+            elif not database.is_file():
+                fail("database_not_found", "Ledger file does not exist; use new to create it.")
+            ledger = Ledger(args.db, snapshot=args.command in SNAPSHOT_COMMANDS)
+            response = dispatch(ledger, args)
+            ledger.db.commit()
     except WorkError as error:
         response = {"ok": False, "error": {"code": error.code, "message": error.message}}
     except sqlite3.Error:

@@ -41,7 +41,7 @@ Supported checks:
 
 ## CLI workflow
 
-Every command requires `--db PATH` before the subcommand. `new` creates missing database parent directories; other commands reject a nonexistent database. Command output is JSON; errors return exit code 2. Check `ok` and the exit status. Task IDs come from the returned task object; never invent them. A spec is limited to 1 MiB and 128 criteria. `list` shows the latest 100 tasks; `show` includes at most 50 recent actions, 50 claims and 20 events. The complete history remains in SQLite; a limited view is not evidence that older records do not exist.
+Ledger commands require `--db PATH` before the subcommand. `new` creates missing database parent directories; other ledger commands reject a nonexistent database. Command output is JSON; errors return exit code 2. Check `ok` and the exit status. Task IDs come from the returned task object; never invent them. A spec is limited to 1 MiB and 128 criteria. `list` shows the latest 100 tasks; `show` includes at most 50 recent actions, 50 claims and 20 events. The complete history remains in SQLite; a limited view is not evidence that older records do not exist.
 
 ```text
 python <skill>/scripts/workctl.py --db <project>/.universal-work/state.sqlite3 new --spec <project>/task.json
@@ -85,11 +85,49 @@ Claims conflict across tasks sharing the same database and resolved resource pat
 
 ## Recover and check the installation
 
-Use the original workspace, database and task ID. Run `show TASK_ID` and compare the saved checkpoints with the current files, action journal and claims.
+Use the original workspace, database and task ID. Run `diagnose TASK_ID` and compare the latest saved checkpoint with the current files, action journal and claims. Use `show TASK_ID` to read the full configured criteria and recent event details.
 
 1. If the task still says `running`, confirm through the host or operator that the previous worker has stopped. The ledger status and checkpoint age alone cannot establish that. Once confirmed, run `block TASK_ID --reason "Previous worker confirmed stopped"` to record the interruption and pause ledger work. If you cannot confirm the worker stopped, leave the task for the operator to resolve.
 2. For a blocked or stopped task, reconcile any prepared or unknown action with authoritative readback or a receipt before continuing. If the outcome stays uncertain, leave the task paused and preserve the journal entry. Inspect any artifacts left by the previous worker and resolve its advisory claims before writing the affected resources.
 3. Run `resume TASK_ID` once the unresolved actions are settled. It preserves the task ID, original deadline and used steps. If the limits are exhausted, report the result and keep the original records. Change the task scope explicitly only if the user authorizes further work.
+
+`diagnose` reads the committed ledger state. It can find the latest checkpoint even if it has fallen out of the recent event window. It reports ledger-side resume blockers, the latest recorded verification and up to 50 entries each for unresolved actions and outstanding claims. Use the counts and truncation flags to account for additional entries. For a running task, the diagnosis calls for operator confirmation before takeover. Check worker status, current files and external outcomes separately. Keep the diagnosis local because it contains workspace paths, checkpoint notes and action evidence.
+
+## Export verification evidence
+
+Run `export-evidence TASK_ID` and save the JSON output as UTF-8. It records the task state, original limits, action and claim counts, and the last persisted verification. Each result identifies the criterion by its 1-based position in the task spec and includes the check type, outcome, and available SHA-256 and byte count. A task with no verification has `recorded_verification: null`. The export has `format_version: 1`.
+
+The default export omits paths, criterion IDs and expected values, checkpoint notes, action details and artifact contents. Review the remaining metadata and hashes before sharing. The recorded results identify bytes checked at the reported time. Re-run verification before relying on files that may have changed. Both snapshot commands read the existing ledger without changing task state, consuming steps or rechecking artifacts.
+
+To let a reviewer repeat one recorded `json_equals` check, explicitly select it and name the file you intend to share:
+
+```text
+... export-evidence TASK_ID --review-criterion report --artifact-name qa-report.json
+```
+
+This adds `reviewer_check` with the result's criterion number, your filename label, the JSON Pointer and the expected value. Share the corresponding file alongside the export. Review the expected value for sensitive data before sharing. The label identifies the file in the handoff. Compare the delivered file's SHA-256 and byte count with the numbered result before rerunning the check.
+
+`workctl-json-equals-v1` decodes UTF-8 with an optional BOM, rejects duplicate keys and nonfinite numbers, and resolves the JSON Pointer, with the empty pointer selecting the whole document. Comparison is recursive with exact object keys and ordered arrays. Booleans and numbers are distinct. JSON fractions use Python's finite float parsing and parsed numbers compare by decimal value. Encode exact decimal quantities as strings when needed.
+
+The export carries a recorded outcome and a reproducible check. Authenticating the export or validating claims about a separate input, such as the release ZIP named in a QA report, requires independent evidence of that input or provenance.
+
+## Replay a reviewer check
+
+```text
+python scripts/workctl.py verify-evidence --evidence evidence.json --artifact qa-report.json
+```
+
+This reads the two explicit files without a ledger or network access. It checks the report filename, raw byte count and SHA-256 against the selected result, then runs the same JSON comparison used by the ledger. A successful replay requires the recorded outcome and the reproduced comparison to pass. Input limits are 2 MiB for the export and 64 MiB for the artifact. File agreement does not authenticate the export or its timestamp.
+
+For the release QA example, run the separate source check when you have the ZIP:
+
+```text
+python examples/verify_release_archive.py qa-report.json Universal_Work_v1.0_Candidate_eeb38fa.zip
+```
+
+It checks the ZIP filename, digest, integrity, number of files and commit in the ZIP comment. The comment identifies a claimed commit. Comparing file contents with Git is a separate provenance check.
+
+## Check the installation
 
 For an installation or a code change, run the bundled deterministic acceptance suite:
 
