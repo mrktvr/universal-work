@@ -8,6 +8,7 @@ A Codex skill for substantial tasks that span research, code, documents, data, o
 - Save task state across local process restarts. Use the [recovery procedure](references/ledger.md#recover-and-check-the-installation) to inspect and continue interrupted work within its original limits.
 - Check nonempty files, literal text, exact JSON values, and decimal CSV totals. Completion reruns checks and records hashes.
 - Journal external-action outcomes and advisory resource claims for cooperating workers.
+- Diagnose saved recovery state and export recorded verification with the [ledger CLI](references/ledger.md#export-verification-evidence).
 
 The skill does not supply missing tools or permissions, schedule autonomous workers, enforce host-wide spending limits, or guarantee exactly-once service mutations. Claims are bookkeeping, not filesystem locks. Checkpoints require the same persistent filesystem. Artifact checks do not establish factual accuracy, code security, or subjective quality; those require separate review. Ledger notes are unencrypted: keep credentials out of them.
 

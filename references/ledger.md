@@ -85,11 +85,21 @@ Claims conflict across tasks sharing the same database and resolved resource pat
 
 ## Recover and check the installation
 
-Use the original workspace, database and task ID. Run `show TASK_ID` and compare the saved checkpoints with the current files, action journal and claims.
+Use the original workspace, database and task ID. Run `diagnose TASK_ID` and compare the latest saved checkpoint with the current files, action journal and claims. Use `show TASK_ID` to read the full configured criteria and recent event details.
 
 1. If the task still says `running`, confirm through the host or operator that the previous worker has stopped. The ledger status and checkpoint age alone cannot establish that. Once confirmed, run `block TASK_ID --reason "Previous worker confirmed stopped"` to record the interruption and pause ledger work. If you cannot confirm the worker stopped, leave the task for the operator to resolve.
 2. For a blocked or stopped task, reconcile any prepared or unknown action with authoritative readback or a receipt before continuing. If the outcome stays uncertain, leave the task paused and preserve the journal entry. Inspect any artifacts left by the previous worker and resolve its advisory claims before writing the affected resources.
 3. Run `resume TASK_ID` once the unresolved actions are settled. It preserves the task ID, original deadline and used steps. If the limits are exhausted, report the result and keep the original records. Change the task scope explicitly only if the user authorizes further work.
+
+`diagnose` reads the committed ledger state. It can find the latest checkpoint even if it has fallen out of the recent event window. It reports ledger-side resume blockers, the latest recorded verification and up to 50 entries each for unresolved actions and outstanding claims. Use the counts and truncation flags to account for additional entries. For a running task, the diagnosis calls for operator confirmation before takeover. Check worker status, current files and external outcomes separately. Keep the diagnosis local because it contains workspace paths, checkpoint notes and action evidence.
+
+## Export verification evidence
+
+Run `export-evidence TASK_ID` and save the JSON output as UTF-8. It records the task state, original limits, action and claim counts, and the last persisted verification. Each result identifies the criterion by its 1-based position in the task spec and includes the check type, outcome, and available SHA-256 and byte count. A task with no verification has `recorded_verification: null`. The export has `format_version: 1`.
+
+The export omits paths, criterion IDs and expected values, checkpoint notes, action details and artifact contents. Review the remaining metadata and hashes before sharing. The recorded results identify bytes checked at the reported time. Re-run verification before relying on files that may have changed. Both snapshot commands read the existing ledger without changing task state, consuming steps or rechecking artifacts.
+
+## Check the installation
 
 For an installation or a code change, run the bundled deterministic acceptance suite:
 

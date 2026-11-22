@@ -7,6 +7,7 @@ temporary directory and uses no network. --phase is internal to this example.
 """
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -65,11 +66,13 @@ def prepare(root):
 
 def resume(root):
     task_id = json.loads((root / "task-id.json").read_text(encoding="utf-8"))
-    task = command(root, "show", task_id)["task"]
+    recovery = command(root, "diagnose", task_id)
+    task = recovery["task"]
     require(task["state"] == "stopped" and task["steps"] == 1,
             "Saved stop/checkpoint state was not recovered")
-    require(any(event["kind"] == "checkpoint" for event in task["recent_events"]),
+    require(recovery["diagnosis"]["latest_checkpoint"] is not None,
             "Saved checkpoint is missing")
+    require(not recovery["diagnosis"]["resume_blockers"], "Recovery is blocked")
     workspace = root / "workspace"
     values = json.loads((workspace / "input.json").read_text(encoding="utf-8"))
     require(values == [2, 3, 5], "Saved inputs changed during handoff")
@@ -80,9 +83,13 @@ def resume(root):
     require(verified["verification"]["passed"] is True, "Exact JSON check failed")
     finished = command(root, "finish", task_id)
     require(finished["task"]["state"] == "completed", "Task did not complete")
-    saved = command(root, "show", task_id)["task"]
-    require(saved["state"] == "completed" and saved["verification"]["passed"] is True,
-            "Completed verification was not persisted")
+    evidence = command(root, "export-evidence", task_id)["evidence"]
+    recorded = evidence["recorded_verification"]
+    require(evidence["task"]["state"] == "completed" and recorded["passed"] is True,
+            "Completed verification was not exported")
+    require(recorded["results"][0]["sha256"] == hashlib.sha256(
+        (workspace / "result.json").read_bytes()).hexdigest(), "Exported digest does not match result.json")
+    write_json(root / "evidence.json", evidence)
 
 
 def main():

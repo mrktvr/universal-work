@@ -30,6 +30,7 @@ FILE_LIMIT = 64 * 1024 * 1024
 APP_ID = 0x55574C31
 SCHEMA_VERSION = 1
 STATES = {"ready", "running", "blocked", "stopped", "checking", "completed"}
+SNAPSHOT_COMMANDS = {"diagnose", "export-evidence"}
 DECIMAL_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
 
 
@@ -203,12 +204,24 @@ def compare_resource_paths(left, right):
     return (left > right) - (left < right)
 
 
+def has_unresolved_actions(actions):
+    return bool(actions.get("prepared", 0) or actions.get("unknown", 0))
+
+
 class Ledger:
-    def __init__(self, path):
-        self.db = sqlite3.connect(path, timeout=5, isolation_level=None)
+    def __init__(self, path, snapshot=False):
+        source = Path(path).absolute().as_uri() + "?mode=ro" if snapshot else path
+        self.db = sqlite3.connect(source, uri=snapshot, timeout=5, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.create_collation("RESOURCE_PATH", compare_resource_paths)
         self.db.execute("PRAGMA busy_timeout=5000")
+        if snapshot:
+            self.db.execute("BEGIN")
+            if self.db.execute("PRAGMA application_id").fetchone()[0] != APP_ID:
+                fail("invalid_database", "Database is not a Universal Work ledger.")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+                fail("invalid_database", "Database schema version is unsupported.")
+            return
         app_id = self.db.execute("PRAGMA application_id").fetchone()[0]
         tables = self.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
         if app_id != APP_ID and (app_id or tables):
@@ -276,11 +289,17 @@ class Ledger:
         if task["state"] == "completed":
             fail("completed", "Completed tasks are immutable; create a new task.")
 
-    def budget(self, task):
+    def budget_error(self, task):
         if task["deadline"] is not None and time.time() >= task["deadline"]:
-            fail("deadline_exceeded", "The original task deadline has expired.")
+            return "deadline_exceeded", "The original task deadline has expired."
         if task["steps"] >= task["spec"]["limits"]["max_steps"]:
-            fail("step_limit", "The task step budget is exhausted.")
+            return "step_limit", "The task step budget is exhausted."
+        return None
+
+    def budget(self, task):
+        error = self.budget_error(task)
+        if error:
+            fail(*error)
 
     def running(self, task, check_budget=True):
         self.mutable(task)
@@ -288,6 +307,74 @@ class Ledger:
             fail("invalid_state", "This command requires a running task.")
         if check_budget:
             self.budget(task)
+
+
+def diagnose(ledger, task):
+    summary = ledger.public(task)
+    task_id = task["id"]
+    checkpoint = ledger.db.execute(
+        "SELECT seq,at,data FROM events WHERE task_id=? AND kind='checkpoint' ORDER BY seq DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    unresolved = ledger.db.execute(
+        "SELECT key,state,description,evidence FROM actions WHERE task_id=? AND state IN ('prepared','unknown') "
+        "ORDER BY created,key LIMIT 50", (task_id,),
+    ).fetchall()
+    claims = ledger.db.execute(
+        "SELECT relpath AS resource,owner FROM claims WHERE task_id=? ORDER BY created,resource LIMIT 50",
+        (task_id,),
+    ).fetchall()
+    blockers = []
+    state = task["state"]
+    if state == "running":
+        blockers.append("confirm_previous_worker_stopped")
+    elif state == "completed":
+        blockers.append("task_completed")
+    elif task["started"] is None:
+        blockers.append("task_not_started")
+    elif state not in ("blocked", "stopped"):
+        blockers.append("invalid_state")
+    budget_error = ledger.budget_error(task)
+    if budget_error:
+        blockers.append(budget_error[0])
+    if has_unresolved_actions(summary["actions"]):
+        blockers.append("unresolved_actions")
+    unresolved_count = sum(summary["actions"].get(state, 0) for state in ("prepared", "unknown"))
+    return {
+        "ok": True,
+        "task": summary,
+        "diagnosis": {
+            "resume_blockers": blockers,
+            "latest_checkpoint": {
+                "seq": checkpoint["seq"], "at": stamp(checkpoint["at"]),
+                "note": loads(checkpoint["data"])["note"],
+            } if checkpoint else None,
+            "unresolved_actions": [dict(row) for row in unresolved],
+            "unresolved_actions_truncated": unresolved_count > len(unresolved),
+            "outstanding_claims": [dict(row) for row in claims],
+            "outstanding_claims_truncated": summary["claims"] > len(claims),
+            "recorded_verification": loads(task["verification"]) if task["verification"] else None,
+        },
+    }
+
+
+def export_evidence(ledger, task):
+    summary = ledger.public(task)
+    verification = None
+    if task["verification"]:
+        saved = loads(task["verification"])
+        results = []
+        for number, result in enumerate(saved["results"], start=1):
+            safe_result = {key: result[key] for key in ("type", "passed", "sha256", "bytes", "code")
+                           if key in result}
+            results.append({"criterion_number": number, **safe_result})
+        verification = {"checked_at": saved["checked_at"], "passed": saved["passed"], "results": results}
+    return {"ok": True, "evidence": {
+        "format_version": 1,
+        "task": {key: summary[key] for key in
+                 ("id", "state", "steps", "limits", "created_at", "started_at", "deadline", "actions", "claims")},
+        "recorded_verification": verification,
+    }}
 
 
 def read_artifact(workspace, relative):
@@ -408,7 +495,7 @@ def verify(ledger, task, finish=False):
         code, message = "verification_failed", "One or more current artifacts failed verification."
     elif finish:
         counts = ledger.counts(task["id"])
-        if counts["actions"].get("prepared", 0) or counts["actions"].get("unknown", 0):
+        if has_unresolved_actions(counts["actions"]):
             code, message = "unresolved_actions", "Reconcile all prepared or unknown actions before completion."
         elif counts["claims"]:
             code, message = "outstanding_claims", "Release all claims before completion."
@@ -440,6 +527,10 @@ def dispatch(ledger, args):
     task_id = task["id"]
     if command == "show":
         return {"ok": True, "task": ledger.public(task, detailed=True)}
+    if command == "diagnose":
+        return diagnose(ledger, task)
+    if command == "export-evidence":
+        return export_evidence(ledger, task)
     ledger.mutable(task)
     if command in ("verify", "finish"):
         return verify(ledger, task, command == "finish")
@@ -455,7 +546,7 @@ def dispatch(ledger, args):
             fail("invalid_state", "Only a previously started blocked or stopped task can resume.")
         ledger.budget(task)
         actions = ledger.counts(task_id)["actions"]
-        if actions.get("prepared", 0) or actions.get("unknown", 0):
+        if has_unresolved_actions(actions):
             fail("unresolved_actions", "Reconcile prepared or unknown external actions before resuming.")
         ledger.update(task_id, "running")
         ledger.event(task_id, "resumed")
@@ -533,6 +624,8 @@ def parser():
     new = sub.add_parser("new", help="validate a JSON spec and create a ready task")
     new.add_argument("--spec", required=True, help="UTF-8 JSON task spec, at most 1 MiB")
     sub.add_parser("list", help="show the latest 100 tasks")
+    sub.add_parser("diagnose", help="inspect saved recovery state").add_argument("task")
+    sub.add_parser("export-evidence", help="export recorded verification and task metadata").add_argument("task")
     for name in ("show", "start", "checkpoint", "verify", "finish", "stop", "block", "resume", "action-prepare", "action-outcome", "claim", "release"):
         command = sub.add_parser(name)
         command.add_argument("task")
@@ -565,7 +658,7 @@ def main():
             database.parent.mkdir(parents=True, exist_ok=True)
         elif not database.is_file():
             fail("database_not_found", "Ledger file does not exist; use new to create it.")
-        ledger = Ledger(args.db)
+        ledger = Ledger(args.db, snapshot=args.command in SNAPSHOT_COMMANDS)
         response = dispatch(ledger, args)
         ledger.db.commit()
     except WorkError as error:

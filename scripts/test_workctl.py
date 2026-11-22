@@ -10,6 +10,7 @@ import csv
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -285,14 +286,21 @@ time.sleep(60)
         self.assertEqual(interrupted["steps"], 2)
         checkpoint = next(event for event in interrupted["recent_events"] if event["kind"] == "checkpoint")
         self.assertEqual(checkpoint["data"]["note"], "Inputs reviewed")
+        diagnosis = self.command("diagnose", task_id)["diagnosis"]
+        self.assertEqual(diagnosis["latest_checkpoint"]["note"], "Inputs reviewed")
+        self.assertEqual(diagnosis["resume_blockers"], ["confirm_previous_worker_stopped", "unresolved_actions"])
+        self.assertEqual(diagnosis["unresolved_actions"][0]["key"], "export")
+        self.assertIsNone(diagnosis["recorded_verification"])
         self.assertEqual(self.command("resume", task_id, ok=False)["error"]["code"], "invalid_state")
 
         self.command("block", task_id, "--reason", "Confirmed the original worker exited")
+        self.assertEqual(self.command("diagnose", task_id)["diagnosis"]["resume_blockers"], ["unresolved_actions"])
         self.assertEqual(self.command("resume", task_id, ok=False)["error"]["code"], "unresolved_actions")
         receipt = (self.workspace / "receipt.txt").read_text(encoding="utf-8")
         self.assertEqual(receipt, "export confirmed")
         self.command("action-outcome", task_id, "--key", "export", "--outcome", "succeeded",
                      "--evidence", receipt)
+        self.assertEqual(self.command("diagnose", task_id)["diagnosis"]["resume_blockers"], [])
         resumed = self.command("resume", task_id)["task"]
         self.assertEqual(resumed["state"], "running")
         self.assertEqual(resumed["steps"], interrupted["steps"])
@@ -301,6 +309,69 @@ time.sleep(60)
         self.assertEqual(resumed["actions"], {"succeeded": 1})
         self.artifact()
         self.assertEqual(self.command("finish", task_id)["task"]["state"], "completed")
+
+    def test_diagnose_finds_checkpoint_outside_recent_history(self):
+        task_id = self.running(limits={"max_steps": 2, "max_seconds": 120})
+        self.command("claim", task_id, "--resource", "artifact.txt", "--owner", "old-worker")
+        self.command("checkpoint", task_id, "--note", "Older checkpoint")
+        self.command("action-prepare", task_id, "--key", "export", "--description", "Record only")
+        self.command("action-outcome", task_id, "--key", "export", "--outcome", "unknown",
+                     "--evidence", "Waiting for readback")
+        self.artifact()
+        for _ in range(10):
+            self.command("verify", task_id)
+        self.command("block", task_id, "--reason", "Handoff")
+        self.assertFalse(any(event["kind"] == "checkpoint"
+                             for event in self.command("show", task_id)["task"]["recent_events"]))
+        diagnosis = self.command("diagnose", task_id)["diagnosis"]
+        self.assertEqual(diagnosis["latest_checkpoint"]["note"], "Older checkpoint")
+        self.assertEqual(diagnosis["resume_blockers"], ["step_limit", "unresolved_actions"])
+        self.assertEqual(diagnosis["unresolved_actions"][0]["state"], "unknown")
+        self.assertEqual(diagnosis["outstanding_claims"], [{"resource": "artifact.txt", "owner": "old-worker"}])
+        self.assertTrue(diagnosis["recorded_verification"]["passed"])
+
+    def test_export_reports_recorded_checks_without_local_details(self):
+        path = self.artifact(name="private-filename.txt", content="private-needle")
+        task_id = self.running(criteria=[{
+            "id": "private-criterion", "type": "text_contains",
+            "path": path.name, "needle": "private-needle",
+        }])
+        self.command("checkpoint", task_id, "--note", "private-checkpoint")
+        self.command("action-prepare", task_id, "--key", "private-key",
+                     "--description", "private-description")
+        self.command("action-outcome", task_id, "--key", "private-key", "--outcome", "succeeded",
+                     "--evidence", "private-evidence")
+        self.assertIsNone(self.command("export-evidence", task_id)["evidence"]["recorded_verification"])
+        verified_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.command("verify", task_id)
+        path.write_text("edited after verification", encoding="utf-8")
+        before = self.command("show", task_id)["task"]
+
+        # Hold an uncommitted write to confirm the commands read the committed WAL snapshot.
+        writer = sqlite3.connect(self.database)
+        try:
+            writer.execute("UPDATE tasks SET state='blocked' WHERE id=?", (task_id,))
+            self.assertEqual(self.command("diagnose", task_id)["task"]["state"], "running")
+            exported = self.command("export-evidence", task_id)["evidence"]
+        finally:
+            writer.rollback()
+            writer.close()
+
+        self.assertEqual(exported["format_version"], 1)
+        self.assertEqual(exported["task"]["state"], "running")
+        self.assertEqual(exported["task"]["actions"], {"succeeded": 1})
+        verification = exported["recorded_verification"]
+        self.assertTrue(verification["passed"])
+        self.assertEqual(verification["results"], [{
+            "criterion_number": 1, "type": "text_contains", "passed": True,
+            "sha256": verified_hash, "bytes": len("private-needle"),
+        }])
+        serialized = json.dumps(exported)
+        for private in ("private-", str(self.workspace), before["goal"], "edited after verification"):
+            self.assertNotIn(private, serialized)
+        self.assertEqual(self.command("show", task_id)["task"], before)
+        self.command("verify", task_id, ok=False)
+        self.assertFalse(self.command("export-evidence", task_id)["evidence"]["recorded_verification"]["passed"])
 
     def test_prepared_action_survives_process_exit_and_cannot_be_prepared_twice(self):
         self.artifact()
