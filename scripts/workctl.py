@@ -32,7 +32,7 @@ JSON_COMPARISON = "workctl-json-equals-v1"
 APP_ID = 0x55574C31
 SCHEMA_VERSION = 1
 STATES = {"ready", "running", "blocked", "stopped", "checking", "completed"}
-SNAPSHOT_COMMANDS = {"diagnose", "export-evidence"}
+SNAPSHOT_COMMANDS = {"show", "diagnose", "export-evidence"}
 DECIMAL_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
 
 
@@ -108,12 +108,17 @@ def relative_path(value):
     return normalized
 
 
+def workspace_root(workspace):
+    root = Path(workspace).resolve(strict=True)
+    if str(root) != workspace or not root.is_dir():
+        fail("unsafe_path", "The stored workspace no longer resolves to its original directory.")
+    return root
+
+
 def contained(workspace, value):
     relative = relative_path(value)
     try:
-        root = Path(workspace).resolve(strict=True)
-        if str(root) != workspace or not root.is_dir():
-            fail("unsafe_path", "The stored workspace no longer resolves to its original directory.")
+        root = workspace_root(workspace)
         target = (root / relative).resolve(strict=False)
         target.relative_to(root)
         if target == root:
@@ -328,6 +333,21 @@ def diagnose(ledger, task):
     ).fetchall()
     blockers = []
     state = task["state"]
+    pause = None
+    if state in ("blocked", "stopped"):
+        kind = {"blocked": "block", "stopped": "stop"}[state]
+        event = ledger.db.execute(
+            "SELECT seq,at,data FROM events WHERE task_id=? AND kind=? ORDER BY seq DESC LIMIT 1",
+            (task_id, kind),
+        ).fetchone()
+        if event:
+            pause = {"seq": event["seq"], "at": stamp(event["at"]), "kind": kind,
+                     "reason": loads(event["data"])["reason"]}
+    try:
+        workspace_root(task["spec"]["workspace"])
+        workspace_available = True
+    except (OSError, ValueError, RuntimeError, WorkError):
+        workspace_available = False
     if state == "running":
         blockers.append("confirm_previous_worker_stopped")
     elif state == "completed":
@@ -347,6 +367,8 @@ def diagnose(ledger, task):
         "task": summary,
         "diagnosis": {
             "resume_blockers": blockers,
+            "current_pause": pause,
+            "workspace_available": workspace_available,
             "latest_checkpoint": {
                 "seq": checkpoint["seq"], "at": stamp(checkpoint["at"]),
                 "note": loads(checkpoint["data"])["note"],

@@ -91,7 +91,11 @@ Use the original workspace, database and task ID. Run `diagnose TASK_ID` and com
 2. For a blocked or stopped task, reconcile any prepared or unknown action with authoritative readback or a receipt before continuing. If the outcome stays uncertain, leave the task paused and preserve the journal entry. Inspect any artifacts left by the previous worker and resolve its advisory claims before writing the affected resources.
 3. Run `resume TASK_ID` once the unresolved actions are settled. It preserves the task ID, original deadline and used steps. If the limits are exhausted, report the result and keep the original records. Change the task scope explicitly only if the user authorizes further work.
 
-`diagnose` reads the committed ledger state. It can find the latest checkpoint even if it has fallen out of the recent event window. It reports ledger-side resume blockers, the latest recorded verification and up to 50 entries each for unresolved actions and outstanding claims. Use the counts and truncation flags to account for additional entries. For a running task, the diagnosis calls for operator confirmation before takeover. Check worker status, current files and external outcomes separately. Keep the diagnosis local because it contains workspace paths, checkpoint notes and action evidence.
+`diagnose` reads the committed ledger state. It can find the latest checkpoint even if it has fallen out of the recent event window. It reports ledger-side resume blockers, the latest recorded verification and up to 50 entries each for unresolved actions and outstanding claims. Use the counts and truncation flags to account for additional entries.
+
+`current_pause` is the saved block or stop reason for the current paused state, or `null` when no such reason is recorded. `workspace_available` says whether the stored workspace resolves to its original directory on this host. This is a filesystem observation. Inspect current artifact files and confirm external outcomes separately. For a running task, confirm that the original worker stopped before takeover. Keep the diagnosis local because it contains workspace paths, checkpoint notes, pause reasons and action evidence.
+
+`show`, `diagnose` and `export-evidence` open the ledger read-only. On a live WAL ledger, SQLite can still use its journal sidecar files to coordinate readers. Use a consistent SQLite snapshot for archival review.
 
 ## Export verification evidence
 

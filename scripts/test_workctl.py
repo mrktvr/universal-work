@@ -326,10 +326,38 @@ time.sleep(60)
                              for event in self.command("show", task_id)["task"]["recent_events"]))
         diagnosis = self.command("diagnose", task_id)["diagnosis"]
         self.assertEqual(diagnosis["latest_checkpoint"]["note"], "Older checkpoint")
+        self.assertTrue(diagnosis["workspace_available"])
+        self.assertEqual(diagnosis["current_pause"]["kind"], "block")
+        self.assertEqual(diagnosis["current_pause"]["reason"], "Handoff")
         self.assertEqual(diagnosis["resume_blockers"], ["step_limit", "unresolved_actions"])
         self.assertEqual(diagnosis["unresolved_actions"][0]["state"], "unknown")
         self.assertEqual(diagnosis["outstanding_claims"], [{"resource": "artifact.txt", "owner": "old-worker"}])
         self.assertTrue(diagnosis["recorded_verification"]["passed"])
+
+    def test_diagnose_separates_current_pause_from_workspace_availability(self):
+        task_id = self.running()
+        self.command("block", task_id, "--reason", "Older blocker")
+        self.command("resume", task_id)
+        self.assertIsNone(self.command("diagnose", task_id)["diagnosis"]["current_pause"])
+        stopped = self.command("stop", task_id, "--reason", "Wait for original workspace")
+        self.assertEqual(stopped["task"]["state"], "stopped")
+        self.workspace.rename(self.root / "moved-workspace")
+        diagnosis = self.command("diagnose", task_id)["diagnosis"]
+        self.assertEqual(diagnosis["current_pause"]["reason"], "Wait for original workspace")
+        self.assertEqual(diagnosis["current_pause"]["kind"], "stop")
+        self.assertFalse(diagnosis["workspace_available"])
+        self.assertEqual(diagnosis["resume_blockers"], [])
+
+    def test_show_does_not_rewrite_archived_ledger(self):
+        task_id = self.running()
+        archived = sqlite3.connect(self.database)
+        try:
+            self.assertEqual(archived.execute("PRAGMA journal_mode=DELETE").fetchone(), ("delete",))
+        finally:
+            archived.close()
+        before = self.database.read_bytes()
+        self.assertEqual(self.command("show", task_id)["task"]["state"], "running")
+        self.assertEqual(hashlib.sha256(self.database.read_bytes()).digest(), hashlib.sha256(before).digest())
 
     def test_export_reports_recorded_checks_without_local_details(self):
         path = self.artifact(name="private-filename.txt", content="private-needle")
