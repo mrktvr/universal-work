@@ -44,6 +44,21 @@ if ($LASTEXITCODE -ne 0) { throw 'Git clone failed' }
 
 Follow your host's skill-discovery procedure after cloning. Availability in a particular host should be verified there.
 
+### Windows first-run checklist
+
+1. **Check skill discovery in Codex.** Open a new Codex session in the Windows folder where you want to do the work. In the ChatGPT desktop app, type `@` in the composer and look for `universal-work` in the skill picker. In Codex CLI, use `/skills`. If the skill is missing, confirm that `$HOME\.agents\skills\universal-work\SKILL.md` exists in the environment where Codex is running, then restart Codex and check again. [OpenAI skill discovery guide](https://learn.chatgpt.com/docs/build-skills)
+2. **Check Python in PowerShell.** From your project folder, run `python --version`. If that command is unavailable or reports an older version, try `py -3 --version`. Use whichever command reports Python 3.10 or newer.
+3. **Check the ledger CLI from your project folder.** Point to the installed copy of `workctl.py` so the command works from a separate project. If you installed the skill elsewhere, use that installation's full script path.
+
+   ```powershell
+   $workctl = Join-Path $HOME '.agents\skills\universal-work\scripts\workctl.py'
+   python "$workctl" --help
+   ```
+
+   If you used the Windows launcher in step 2, run `py -3 "$workctl" --help` instead. The help output starts with `usage: workctl.py` and lists the available commands.
+
+   For real tasks, keep the database in your project folder, for example at `.universal-work\state.sqlite3`. Put `--db` before the subcommand. Once that database exists, run `python "$workctl" --db '.universal-work\state.sqlite3' list` to inspect it (use `py -3` in place of `python` if needed). See the [ledger workflow](references/ledger.md#cli-workflow) to create your first task.
+
 ## Use
 
 Invoke the skill with a concrete deliverable and its constraints, for example:
