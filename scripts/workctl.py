@@ -358,7 +358,27 @@ def diagnose(ledger, task):
     }
 
 
-def export_evidence(ledger, task):
+def reviewer_check(task, verification, criterion_id, artifact_name):
+    if not artifact_name or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}", artifact_name):
+        fail("invalid_argument", "--artifact-name must be a filename label with no directory components.")
+    for number, criterion in enumerate(task["spec"]["criteria"], start=1):
+        if criterion["id"] != criterion_id:
+            continue
+        if criterion["type"] != "json_equals":
+            fail("unsupported_criterion", "Reviewer exports currently support json_equals only.")
+        if verification is None or verification["results"][number - 1]["sha256"] is None:
+            fail("missing_verification", "No artifact fingerprint was recorded for this criterion.")
+        return {
+            "criterion_number": number,
+            "artifact_name": artifact_name,
+            "comparison": "workctl-json-equals-v1",
+            "pointer": criterion["pointer"],
+            "expected": criterion["expected"],
+        }
+    fail("not_found", "The requested criterion does not exist.")
+
+
+def export_evidence(ledger, task, args):
     summary = ledger.public(task)
     verification = None
     if task["verification"]:
@@ -369,12 +389,19 @@ def export_evidence(ledger, task):
                            if key in result}
             results.append({"criterion_number": number, **safe_result})
         verification = {"checked_at": saved["checked_at"], "passed": saved["passed"], "results": results}
-    return {"ok": True, "evidence": {
+    evidence = {
         "format_version": 1,
         "task": {key: summary[key] for key in
                  ("id", "state", "steps", "limits", "created_at", "started_at", "deadline", "actions", "claims")},
         "recorded_verification": verification,
-    }}
+    }
+    if args.review_criterion is not None:
+        evidence["reviewer_check"] = reviewer_check(
+            task, verification, args.review_criterion, args.artifact_name,
+        )
+    elif args.artifact_name is not None:
+        fail("invalid_argument", "--artifact-name requires --review-criterion.")
+    return {"ok": True, "evidence": evidence}
 
 
 def read_artifact(workspace, relative):
@@ -530,7 +557,7 @@ def dispatch(ledger, args):
     if command == "diagnose":
         return diagnose(ledger, task)
     if command == "export-evidence":
-        return export_evidence(ledger, task)
+        return export_evidence(ledger, task, args)
     ledger.mutable(task)
     if command in ("verify", "finish"):
         return verify(ledger, task, command == "finish")
@@ -625,7 +652,10 @@ def parser():
     new.add_argument("--spec", required=True, help="UTF-8 JSON task spec, at most 1 MiB")
     sub.add_parser("list", help="show the latest 100 tasks")
     sub.add_parser("diagnose", help="inspect saved recovery state").add_argument("task")
-    sub.add_parser("export-evidence", help="export recorded verification and task metadata").add_argument("task")
+    export = sub.add_parser("export-evidence", help="export recorded verification and task metadata")
+    export.add_argument("task")
+    export.add_argument("--review-criterion", metavar="ID", help="include this JSON check's expected value and pointer")
+    export.add_argument("--artifact-name", metavar="NAME", help="shareable filename label for the selected check")
     for name in ("show", "start", "checkpoint", "verify", "finish", "stop", "block", "resume", "action-prepare", "action-outcome", "claim", "release"):
         command = sub.add_parser(name)
         command.add_argument("task")

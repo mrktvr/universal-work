@@ -97,7 +97,19 @@ Use the original workspace, database and task ID. Run `diagnose TASK_ID` and com
 
 Run `export-evidence TASK_ID` and save the JSON output as UTF-8. It records the task state, original limits, action and claim counts, and the last persisted verification. Each result identifies the criterion by its 1-based position in the task spec and includes the check type, outcome, and available SHA-256 and byte count. A task with no verification has `recorded_verification: null`. The export has `format_version: 1`.
 
-The export omits paths, criterion IDs and expected values, checkpoint notes, action details and artifact contents. Review the remaining metadata and hashes before sharing. The recorded results identify bytes checked at the reported time. Re-run verification before relying on files that may have changed. Both snapshot commands read the existing ledger without changing task state, consuming steps or rechecking artifacts.
+The default export omits paths, criterion IDs and expected values, checkpoint notes, action details and artifact contents. Review the remaining metadata and hashes before sharing. The recorded results identify bytes checked at the reported time. Re-run verification before relying on files that may have changed. Both snapshot commands read the existing ledger without changing task state, consuming steps or rechecking artifacts.
+
+To let a reviewer repeat one recorded `json_equals` check, explicitly select it and name the file you intend to share:
+
+```text
+... export-evidence TASK_ID --review-criterion report --artifact-name qa-report.json
+```
+
+This adds `reviewer_check` with the result's criterion number, your filename label, the JSON Pointer and the expected value. Share the corresponding file alongside the export. Review the expected value for sensitive data before sharing. The label identifies the file in the handoff. Compare the delivered file's SHA-256 and byte count with the numbered result before rerunning the check.
+
+`workctl-json-equals-v1` decodes UTF-8 with an optional BOM, rejects duplicate keys and nonfinite numbers, and resolves the JSON Pointer, with the empty pointer selecting the whole document. Comparison is recursive with exact object keys and ordered arrays. Booleans and numbers are distinct. JSON fractions use Python's finite float parsing and parsed numbers compare by decimal value. Encode exact decimal quantities as strings when needed.
+
+The export carries a recorded outcome and a reproducible check. Authenticating the export or validating claims about a separate input, such as the release ZIP named in a QA report, requires independent evidence of that input or provenance.
 
 ## Check the installation
 

@@ -373,6 +373,44 @@ time.sleep(60)
         self.command("verify", task_id, ok=False)
         self.assertFalse(self.command("export-evidence", task_id)["evidence"]["recorded_verification"]["passed"])
 
+    def test_reviewer_export_discloses_only_the_selected_json_check(self):
+        path = self.artifact('{"release":{"approved":true}}', "local/report.json")
+        task_id = self.running(criteria=[
+            {"id": "presence", "type": "file_nonempty", "path": "local/report.json"},
+            {"id": "approval", "type": "json_equals", "path": "local/report.json",
+             "pointer": "/release/approved", "expected": True},
+        ])
+        selection = ("--review-criterion", "approval", "--artifact-name", "qa-report.json")
+        pending = self.command("export-evidence", task_id, *selection, ok=False)
+        self.assertEqual(pending["error"]["code"], "missing_verification")
+        self.command("finish", task_id)
+        default = self.command("export-evidence", task_id)["evidence"]
+        self.assertNotIn("reviewer_check", default)
+        exported = self.command("export-evidence", task_id, *selection)["evidence"]
+        check = exported.pop("reviewer_check")
+        self.assertEqual(exported, default)
+        self.assertEqual(check, {
+            "criterion_number": 2, "artifact_name": "qa-report.json",
+            "comparison": "workctl-json-equals-v1", "pointer": "/release/approved", "expected": True,
+        })
+        recorded = exported["recorded_verification"]["results"][check["criterion_number"] - 1]
+        raw = path.read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), recorded["sha256"])
+        value = json.loads(raw)
+        for token in check["pointer"].split("/")[1:]:
+            value = value[token]
+        self.assertIs(value, check["expected"])
+        for options, code in [
+            (("--review-criterion", "presence", "--artifact-name", "qa-report.json"), "unsupported_criterion"),
+            (("--review-criterion", "unknown", "--artifact-name", "qa-report.json"), "not_found"),
+            (("--review-criterion", "approval", "--artifact-name", "../qa-report.json"), "invalid_argument"),
+            (("--review-criterion", "approval"), "invalid_argument"),
+            (("--artifact-name", "qa-report.json"), "invalid_argument"),
+        ]:
+            with self.subTest(options=options):
+                error = self.command("export-evidence", task_id, *options, ok=False)["error"]
+                self.assertEqual(error["code"], code)
+
     def test_prepared_action_survives_process_exit_and_cannot_be_prepared_twice(self):
         self.artifact()
         task_id = self.running()
