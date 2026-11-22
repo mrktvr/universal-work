@@ -5,7 +5,7 @@ A Codex skill for substantial tasks that span research, code, documents, data, o
 ## Capabilities and boundaries
 
 - Route work to available host tools and specialist skills, define acceptance criteria, preserve progress, and review the actual deliverable.
-- Save task state across local process restarts; inspect and resume stopped or blocked work within its original limits.
+- Save task state across local process restarts. Use the [recovery procedure](references/ledger.md#recover-and-check-the-installation) to inspect and continue interrupted work within its original limits.
 - Check nonempty files, literal text, exact JSON values, and decimal CSV totals. Completion reruns checks and records hashes.
 - Journal external-action outcomes and advisory resource claims for cooperating workers.
 

@@ -49,6 +49,7 @@ Distinguish missing knowledge, procedure, tool, authorization and verification. 
 
 - Before handoff or context loss, save the goal, constraints, sourced decisions, artifact paths/versions, remaining criteria, blockers and next action. Exclude credentials and unnecessary sensitive content.
 - On resume, inspect both saved state and current artifacts. Revalidate assumptions and reconcile unknown external effects before new action.
+- If an interrupted task still shows `running`, follow the [recovery procedure](references/ledger.md#recover-and-check-the-installation) before continuing.
 - Keep checkpoints in the task workspace, never inside the installed skill. Use host-approved persistent storage when state must outlive a transient workspace; a local SQLite file cannot survive deletion of its filesystem.
 - Report results, verification evidence, deliverable links and material limits. Claim publication, installation, external sends and test runs only when observed.
 
