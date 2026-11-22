@@ -3,7 +3,7 @@
 
 Run: python scripts/test_workctl.py
 Every CLI invocation runs in a new process. All fixtures, databases, resources,
-and simulated action records are disposable local files; no action is executed.
+and simulated action records are disposable local files; no external action is executed.
 """
 
 import csv
@@ -242,6 +242,65 @@ class WorkctlAcceptance(unittest.TestCase):
                 self.assertEqual(resumed["state"], "running")
                 self.assertEqual(resumed["steps"], before["steps"])
                 self.assertEqual(resumed["deadline"], before["deadline"])
+
+    def test_replacement_worker_recovers_after_forced_exit(self):
+        task_id = self.running(limits={"max_steps": 4, "max_seconds": 120})
+        original = self.command("show", task_id)["task"]
+        worker_script = """
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+workctl, database, task_id, workspace = sys.argv[1:]
+cli = [sys.executable, "-X", "utf8", workctl, "--db", database]
+subprocess.run([*cli, "checkpoint", task_id, "--note", "Inputs reviewed"],
+               stdout=subprocess.DEVNULL, check=True, timeout=10)
+subprocess.run([*cli, "action-prepare", task_id, "--key", "export",
+                "--description", "Simulated export"], stdout=subprocess.DEVNULL,
+               check=True, timeout=10)
+Path(workspace, "receipt.txt").write_text("export confirmed", encoding="utf-8")
+Path(workspace, "worker-ready").mkdir()
+time.sleep(60)
+"""
+        with subprocess.Popen(
+            [sys.executable, "-c", worker_script, str(WORKCTL), str(self.database),
+             task_id, str(self.workspace)],
+        ) as worker:
+            try:
+                wait_until = time.monotonic() + 25
+                ready = self.workspace / "worker-ready"
+                while not ready.is_dir() and worker.poll() is None and time.monotonic() < wait_until:
+                    time.sleep(0.02)
+                self.assertTrue(ready.is_dir(), "Worker did not commit its checkpoint and simulated receipt")
+                self.assertIsNone(worker.poll())
+            finally:
+                if worker.poll() is None:
+                    worker.kill()
+                worker.wait(timeout=10)
+
+        interrupted = self.command("show", task_id)["task"]
+        self.assertEqual(interrupted["state"], "running")
+        self.assertEqual(interrupted["actions"], {"prepared": 1})
+        self.assertEqual(interrupted["steps"], 2)
+        checkpoint = next(event for event in interrupted["recent_events"] if event["kind"] == "checkpoint")
+        self.assertEqual(checkpoint["data"]["note"], "Inputs reviewed")
+        self.assertEqual(self.command("resume", task_id, ok=False)["error"]["code"], "invalid_state")
+
+        self.command("block", task_id, "--reason", "Confirmed the original worker exited")
+        self.assertEqual(self.command("resume", task_id, ok=False)["error"]["code"], "unresolved_actions")
+        receipt = (self.workspace / "receipt.txt").read_text(encoding="utf-8")
+        self.assertEqual(receipt, "export confirmed")
+        self.command("action-outcome", task_id, "--key", "export", "--outcome", "succeeded",
+                     "--evidence", receipt)
+        resumed = self.command("resume", task_id)["task"]
+        self.assertEqual(resumed["state"], "running")
+        self.assertEqual(resumed["steps"], interrupted["steps"])
+        self.assertEqual(resumed["limits"], original["limits"])
+        self.assertEqual(resumed["deadline"], original["deadline"])
+        self.assertEqual(resumed["actions"], {"succeeded": 1})
+        self.artifact()
+        self.assertEqual(self.command("finish", task_id)["task"]["state"], "completed")
 
     def test_prepared_action_survives_process_exit_and_cannot_be_prepared_twice(self):
         self.artifact()

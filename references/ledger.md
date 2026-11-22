@@ -85,7 +85,11 @@ Claims conflict across tasks sharing the same database and resolved resource pat
 
 ## Recover and check the installation
 
-On restart, run `show`, inspect current files and outstanding actions/claims, reconcile uncertainty, then resume if allowed. Never replace the database or silently create a fresh task to reset exhausted limits. Change the task scope explicitly if the user authorizes further work.
+Use the original workspace, database and task ID. Run `show TASK_ID` and compare the saved checkpoints with the current files, action journal and claims.
+
+1. If the task still says `running`, confirm through the host or operator that the previous worker has stopped. The ledger status and checkpoint age alone cannot establish that. Once confirmed, run `block TASK_ID --reason "Previous worker confirmed stopped"` to record the interruption and pause ledger work. If you cannot confirm the worker stopped, leave the task for the operator to resolve.
+2. For a blocked or stopped task, reconcile any prepared or unknown action with authoritative readback or a receipt before continuing. If the outcome stays uncertain, leave the task paused and preserve the journal entry. Inspect any artifacts left by the previous worker and resolve its advisory claims before writing the affected resources.
+3. Run `resume TASK_ID` once the unresolved actions are settled. It preserves the task ID, original deadline and used steps. If the limits are exhausted, report the result and keep the original records. Change the task scope explicitly only if the user authorizes further work.
 
 For an installation or a code change, run the bundled deterministic acceptance suite:
 
